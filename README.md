@@ -1,68 +1,74 @@
-# Data_Engineering_Banking-Data
-
-📊 Data Engineering Backend Data
+<h1 align="center">🧹 Customer Data Cleaning</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Apache%20Spark-PySpark%20%7C%20Spark%20SQL-E25A1C?logo=apachespark&logoColor=white" alt="Apache Spark and PySpark" />
-  <img src="https://img.shields.io/badge/Platform-HDFS%20%7C%20YARN-4C8CBF?logo=apachehadoop&logoColor=white" alt="HDFS and YARN" />
-  <img src="https://img.shields.io/badge/Output-CSV-2E8B57" alt="CSV output" />
+  <strong>LendingClub Data Engineering Project · Session 1</strong><br />
+  Preparing customer data for downstream analysis with PySpark
 </p>
 
-An Apache Spark data engineering project that prepares LendingClub loan data for downstream analysis. The notebook reads the accepted-loan dataset from HDFS, derives a hashed member key from borrower profile fields, and writes four subject-area CSV extracts back to HDFS.
+<p align="center">
+  <img src="https://img.shields.io/badge/Apache_Spark-PySpark-E25A1C?style=for-the-badge&logo=apachespark&logoColor=white" alt="Apache Spark and PySpark" />
+  <img src="https://img.shields.io/badge/Hadoop-YARN%20%7C%20HDFS-4C8CBF?style=for-the-badge&logo=apachehadoop&logoColor=white" alt="Hadoop YARN and HDFS" />
+  <img src="https://img.shields.io/badge/Output-Parquet%20%7C%20CSV-2E8B57?style=for-the-badge" alt="Parquet and CSV outputs" />
+</p>
 
-## ✨ Overview
+## 🌟 Overview
 
-The source file contains loan, borrower, repayment, and credit-history fields in one wide CSV. The notebook creates a Spark session configured for YARN and Hive, loads the source data, registers it as a temporary view, and uses Spark SQL to select fields for each output dataset.
-
-It also explores whether a usable member identifier can be derived. The notebook builds `name_sha2` with SHA-256 over nine borrower attributes: employment title and length, home ownership, annual income, ZIP code, state, grade, sub-grade, and verification status. This is an assumed surrogate key, not an official LendingClub member ID.
+This notebook cleans the customer extract created from the LendingClub accepted-loan data. It standardizes field names, adds an ingestion timestamp, removes duplicate and incomplete records, prepares employment length and address-state fields, then saves the cleaned data in Parquet and CSV formats.
 
 ## 🔄 Data flow
 
 ```mermaid
-flowchart LR
-    A[📄 Accepted loans CSV<br/>HDFS] --> B[⚙️ Spark on YARN<br/>Hive support]
-    B --> C[🔐 Derive SHA-256<br/>member key]
-    C --> D[👤 Customer data]
-    C --> E[💳 Loan data]
-    C --> F[💸 Repayment data]
-    C --> G[📋 Credit and delinquency data]
-    D --> H[📁 Four CSV output folders<br/>HDFS]
-    E --> H
-    F --> H
-    G --> H
+flowchart TD
+    A[📄 Raw customer CSV<br/>HDFS] --> B[🧾 Read with supplied schema]
+    B --> C[✏️ Rename fields<br/>Add ingestion timestamp]
+    C --> D[🧹 Remove exact duplicate rows]
+    D --> E[💰 Filter rows missing annual income]
+    E --> F[🔢 Clean and cast employment length]
+    F --> G[📊 Fill missing employment length<br/>with floored average]
+    G --> H[📍 Normalize address state]
+    H --> I[📦 Clean customer dataset]
+    I --> J[🟪 Parquet output<br/>customers_parquet]
+    I --> K[📄 CSV output<br/>customers_csv]
 ```
 
-## 📦 Output datasets
+## 🧽 Cleaning steps
 
-All outputs are written beneath `/user/itv026162/lendingclub/project/raw/`:
+1. **Read the raw customer extract** from HDFS using an explicit schema. Income and credit-limit fields are read as numeric values.
+2. **Rename fields** for readability, including `annual_inc` → `annual_income`, `addr_state` → `address_state`, `zip_code` → `address_zipcode`, and `tot_hi_cred_lim` → `total_high_credit_limit`.
+3. **Add `ingest_date`** with the current timestamp.
+4. **Remove exact duplicate rows** using `distinct()`.
+5. **Remove rows with missing annual income.** The recorded run found six such rows after deduplication.
+6. **Clean `empl_length`** by stripping non-digit characters and casting the result to an integer.
+7. **Fill missing employment lengths** with the floored average. The recorded average was about 6.02 years, so null values were filled with **6**.
+8. **Standardize `address_state`.** Values longer than two characters are changed to `NA`; other values are retained, and null values remain null for later review.
 
-- 👤 `customers_data_csv` — derived member ID, employment, income, location, home ownership, credit grade, and application details.
-- 💳 `loans_data_csv` — loan ID, member ID, requested and funded amounts, term, interest rate, instalment, issue date, status, purpose, and title.
-- 💸 `loans_repayments_data_csv` — loan ID, principal and interest received, late fees, payment totals, and payment dates.
-- 📋 `loan_defaulters_data_csv` — member ID and delinquency, public-record, inquiry, and late-fee indicators.
+## 📈 Recorded data checks
 
-Each output is written with `repartition(1)`, so Spark produces one CSV data part per output directory. Spark may also add metadata files such as `_SUCCESS`.
+The notebook’s saved run shows:
 
-## 📂 Source data
+- **2,260,702** rows before deduplication and **2,260,639** after `distinct()` (a difference of 63 rows).
+- **6** rows with null `annual_income` were filtered out.
+- **146,903** null employment-length values were filled with `6`; the final null check returned **0**.
+- **254** non-null address-state values longer than two characters were identified for replacement with `NA`.
 
-The notebook expects the input file at:
+These are the notebook’s recorded counts. See the input note below before treating them as final, because the CSV reader currently does not enable header handling.
 
-```text
-/user/itv026162/lendingclub/accepted_2007_to_2018Q4.csv
-```
+## 📤 Output data
 
-The expected source is the LendingClub `accepted_2007_to_2018Q4.csv` dataset.
+Both outputs are overwritten when the notebook is rerun:
 
-## 🚀 Run the notebook
+- **Parquet** — `/user/itv026162/lendingclub/project/cleaned/customers_parquet`  
+  Preferred for compact storage and analytical processing.
+- **CSV** — `/user/itv026162/lendingclub/project/cleaned/customers_csv`  
+  Convenient for inspection and exchange with other tools.
 
-Open `Lending_club_project.ipynb` in a PySpark environment with access to HDFS, YARN, and Hive support. Ensure the source CSV is available at the HDFS path above, then run the notebook cells from top to bottom. The output directories are overwritten when the notebook is run again.
+## ▶️ Run the notebook
 
-## 🔎 Identity key and data checks
+Open `Data Cleaning Session 1.ipynb` in a PySpark environment with access to HDFS, YARN, and Hive support. Confirm the raw customer CSV exists at `/user/itv026162/lendingclub/project/raw/customers_data_csv`, then run the cells from top to bottom. Keep the Spark session active until both output writes finish; call `spark.stop()` only at the end.
 
-In its recorded run, the notebook reports **2,260,701 rows** and **2,257,384 distinct hashes**. Repeated hashes can represent shared profile values, not necessarily the same person. Rows whose nine hash inputs are all null produce the SHA-256 hash of an empty string; the notebook identifies these rows but does not remove them from the output datasets.
+## 📝 Implementation notes
 
-## ⚠️ Assumptions and limitations
-
-- `name_sha2` is derived from borrower profile attributes because the notebook treats the source member ID as unavailable. Borrowers with identical values in those fields receive the same hash, so it is not a guaranteed unique or authoritative customer identifier.
-- `loan_defaulters_data_csv` is a name for the selected risk and delinquency fields. The notebook does not filter rows to confirmed defaulters or default loan statuses, so this extract contains those indicators for the source records generally.
-- The notebook uses schema inference and does not define explicit validation, cleaning, or null-handling rules for the other source fields.
+- The upstream CSV includes a header, but the current read step supplies a schema without setting `header=true`. Spark CSV reads default to `header=false`, so the header row can be treated as data and affect the recorded counts. Consider adding `.option("header", "true")` before relying on those counts. [Spark CSV options](https://spark.apache.org/docs/3.5.8/sql-data-sources-csv.html)
+- The address-state code uses `length(address_state) > 2`; one notebook comment says “longer than three.” Align the comment with the two-character rule used in the transformation.
+- The supplied schema spells two fields `empl_length` and `verfication_status_joint`; the upstream headers are `emp_length` and `verification_status_joint`. Consider aligning those names for clarity.
+- Removing non-digits maps values such as `< 1 year` to `1` and `10+ years` to `10`. Confirm that this interpretation matches the analysis requirements.
