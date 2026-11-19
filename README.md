@@ -1,66 +1,60 @@
-# 📊 Data Engineering Backend Data
+# Identifying Bad Data
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Apache%20Spark-PySpark%20%7C%20Spark%20SQL-E25A1C?logo=apachespark&logoColor=white" alt="Apache Spark and PySpark" />
-  <img src="https://img.shields.io/badge/Platform-HDFS%20%7C%20YARN-4C8CBF?logo=apachehadoop&logoColor=white" alt="HDFS and YARN" />
-  <img src="https://img.shields.io/badge/Output-CSV-2E8B57" alt="CSV output" />
-</p>
+## Purpose
 
-An Apache Spark data engineering project that prepares LendingClub loan data for downstream analysis. The notebook reads the accepted-loan dataset from HDFS, derives a hashed member key from borrower profile fields, and writes four subject-area CSV extracts back to HDFS.
+This notebook flags member IDs that appear more than once in three LendingClub source tables. The team treats all records for a flagged member ID as ambiguous, combines the flagged IDs into one exclusion list, and uses that list to produce the cleaned_new tables.
 
-## ✨ Overview
+The notebook output shows conflicting values for repeated IDs, including different total_high_credit_limit values, delinquency history, and recent inquiry counts. In the customer example, the notebook comments that the value could not be selected safely and that the issue was escalated to stakeholders.
 
-The source file contains loan, borrower, repayment, and credit-history fields in one wide CSV. The notebook creates a Spark session configured for YARN and Hive, loads the source data, registers it as a temporary view, and uses Spark SQL to select fields for each output dataset.
+## Workflow
 
-It also explores whether a usable member identifier can be derived. The notebook builds `name_sha2` with SHA-256 over nine borrower attributes: employment title and length, home ownership, annual income, ZIP code, state, grade, sub-grade, and verification status. This is an assumed surrogate key, not an official LendingClub member ID.
-
-## 🔄 Data flow
-
-```mermaid
+~~~mermaid
 flowchart LR
-    A[📄 Accepted loans CSV<br/>HDFS] --> B[⚙️ Spark on YARN<br/>Hive support]
-    B --> C[🔐 Derive SHA-256<br/>member key]
-    C --> D[👤 Customer data]
-    C --> E[💳 Loan data]
-    C --> F[💸 Repayment data]
-    C --> G[📋 Credit and delinquency data]
-    D --> H[📁 Four CSV output folders<br/>HDFS]
-    E --> H
-    F --> H
-    G --> H
-```
+    C["customers<br/>3,157 duplicate IDs"] --> U["Union ID lists"]
+    D["loans_defaulters_delinq<br/>173 duplicate IDs"] --> U
+    R["loans_defaulters_detail_rec_enq<br/>3,189 duplicate IDs"] --> U
+    U --> X["Distinct combined list<br/>3,189 member IDs"]
+    X --> F["Exclude flagged IDs<br/>from selected source tables"]
+    F --> N["Write cleaned_new Parquet<br/>and register Hive tables"]
+~~~
 
-## 📦 Output datasets
+## Findings from saved notebook outputs
 
-All outputs are written beneath `/user/itv026162/lendingclub/project/raw/`:
+![Counts of duplicate member IDs by source and in the combined exclusion set](./identifying_bad_data_duplicate_member_ids.svg)
 
-- 👤 `customers_data_csv` — derived member ID, employment, income, location, home ownership, credit grade, and application details.
-- 💳 `loans_data_csv` — loan ID, member ID, requested and funded amounts, term, interest rate, instalment, issue date, status, purpose, and title.
-- 💸 `loans_repayments_data_csv` — loan ID, principal and interest received, late fees, payment totals, and payment dates.
-- 📋 `loan_defaulters_data_csv` — member ID and delinquency, public-record, inquiry, and late-fee indicators.
+These are counts of distinct member_id groups whose row count is greater than one; they are not counts of excess rows.
 
-Each output is written with `repartition(1)`, so Spark produces one CSV data part per output directory. Spark may also add metadata files such as `_SUCCESS`.
+- **Customers:** 3,157 duplicate member IDs.
+- **Delinquency:** 173 duplicate member IDs.
+- **Detailed records and enquiries:** 3,189 duplicate member IDs.
+- **Combined exclusion set:** 3,189 distinct member IDs.
+- **Cleaned customer table:** 2,254,192 rows after exclusion.
 
-## 📂 Source data
+The combined set has the same count as the detailed-records/enquiries set. Given the notebook's grouped ID lists and distinct union, that means the other two sets contributed no additional IDs in the saved run. Confirm this with explicit set-difference checks before relying on the overlap as a permanent data property.
 
-The notebook expects the input file at:
+The notebook's worked example shows:
 
-```text
-/user/itv026162/lendingclub/accepted_2007_to_2018Q4.csv
-```
+- Five customer rows for one member, with total_high_credit_limit changing between rows.
+- Three delinquency rows for that member, with delinq_2yrs values of 3, 1, and 1 and mths_since_last_delinq values of 0, 0, and 45.
+- Five detail/enquiry rows, with inq_last_6mths values of 0, 3, 2, 1, and 0.
 
-The expected source is the LendingClub `accepted_2007_to_2018Q4.csv` dataset.
+Those differences support treating the examples as unresolved conflicts under a one-row-per-member assumption. They do not, by themselves, prove that every repeated member ID in every source is invalid; confirm the intended grain and whether snapshots or loan-level records are expected.
 
-## 🚀 Run the notebook
+## What the notebook writes
 
-Open `Lending_club_project.ipynb` in a PySpark environment with access to HDFS, YARN, and Hive support. Ensure the source CSV is available at the HDFS path above, then run the notebook cells from top to bottom. The output directories are overwritten when the notebook is run again.
+The combined bad-member ID list is saved under the project's bad output. The notebook then filters flagged IDs from the customer, delinquency, and detailed-record/enquiry tables, writes the resulting Parquet data under cleaned_new, and registers external Hive tables for those outputs.
 
-## 🔎 Identity key and data checks
+The saved notebook output includes a post-filter customer count, but it does not show post-filter row counts for the other two tables. It also does not show source-specific exports for all three duplicate lists, so verify the actual folder contents if those separate files are part of the handoff.
 
-In its recorded run, the notebook reports **2,260,701 rows** and **2,257,384 distinct hashes**. Repeated hashes can represent shared profile values, not necessarily the same person. Rows whose nine hash inputs are all null produce the SHA-256 hash of an empty string; the notebook identifies these rows but does not remove them from the output datasets.
+## Analyst recommendations
 
-## ⚠️ Assumptions and limitations
+1. **Confirm the key grain.** If the customer table is intended to contain one row per member, validate that assumption with the data owner. Keep a separate rule for legitimate repeated snapshots or loan-level rows.
+2. **Separate exact duplicates from conflicting duplicates.** Preserve the source rows, a reason code, and the detected values so an analyst can distinguish identical repeats from material conflicts.
+3. **Check set overlap explicitly.** Compare each source ID set with the combined set and report intersections and source-only IDs.
+4. **Check missing-ID handling.** The most frequent detailed-record/enquiry ID in the saved output begins with e3b0c44298fc1c149…, which is consistent with a SHA-256 hash of an empty string. If IDs are hashed upstream, confirm whether this represents a blank source ID and handle it as missing rather than as an ordinary member.
+5. **Guard against nulls in exclusions.** The notebook uses NOT IN. If the bad-ID list ever contains a true SQL NULL, that predicate can filter out more rows than intended. A left-anti join or a NOT EXISTS rule with explicit null handling is safer.
+6. **Reconcile all output counts.** Record input rows, flagged IDs, excluded rows, retained rows, and post-write counts for every table.
 
-- `name_sha2` is derived from borrower profile attributes because the notebook treats the source member ID as unavailable. Borrowers with identical values in those fields receive the same hash, so it is not a guaranteed unique or authoritative customer identifier.
-- `loan_defaulters_data_csv` is a name for the selected risk and delinquency fields. The notebook does not filter rows to confirmed defaulters or default loan statuses, so this extract contains those indicators for the source records generally.
-- The notebook uses schema inference and does not define explicit validation, cleaning, or null-handling rules for the other source fields.
+## Scope and reproducibility
+
+This README documents the code and saved outputs embedded in Identifying_Bad_Data.ipynb; the Spark/YARN notebook was not rerun. Counts can change when the source tables or cluster data change. The notebook's HDFS locations are environment-specific.
