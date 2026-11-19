@@ -1,66 +1,89 @@
-# 📊 Data Engineering Backend Data
+# Loan Score Calculation
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Apache%20Spark-PySpark%20%7C%20Spark%20SQL-E25A1C?logo=apachespark&logoColor=white" alt="Apache Spark and PySpark" />
-  <img src="https://img.shields.io/badge/Platform-HDFS%20%7C%20YARN-4C8CBF?logo=apachehadoop&logoColor=white" alt="HDFS and YARN" />
-  <img src="https://img.shields.io/badge/Output-CSV-2E8B57" alt="CSV output" />
-</p>
+## Purpose
 
-An Apache Spark data engineering project that prepares LendingClub loan data for downstream analysis. The notebook reads the accepted-loan dataset from HDFS, derives a hashed member key from borrower profile fields, and writes four subject-area CSV extracts back to HDFS.
+This notebook builds a rules-based score from payment history, delinquency and public-record history, and financial/loan attributes. It combines the points into a numeric loan_score and assigns an A–F grade.
 
-## ✨ Overview
+This is a custom score in the notebook; the saved code does not calculate or validate a FICO score.
 
-The source file contains loan, borrower, repayment, and credit-history fields in one wide CSV. The notebook creates a Spark session configured for YARN and Hive, loads the source data, registers it as a temporary view, and uses Spark SQL to select fields for each output dataset.
+## Scoring flow
 
-It also explores whether a usable member identifier can be derived. The notebook builds `name_sha2` with SHA-256 over nine borrower attributes: employment title and length, home ownership, annual income, ZIP code, state, grade, sub-grade, and verification status. This is an assumed surrogate key, not an official LendingClub member ID.
-
-## 🔄 Data flow
-
-```mermaid
+~~~mermaid
 flowchart LR
-    A[📄 Accepted loans CSV<br/>HDFS] --> B[⚙️ Spark on YARN<br/>Hive support]
-    B --> C[🔐 Derive SHA-256<br/>member key]
-    C --> D[👤 Customer data]
-    C --> E[💳 Loan data]
-    C --> F[💸 Repayment data]
-    C --> G[📋 Credit and delinquency data]
-    D --> H[📁 Four CSV output folders<br/>HDFS]
-    E --> H
-    F --> H
-    G --> H
-```
+    P["Payment history<br/>2 inputs · declared 20%"] --> S["Weighted sum"]
+    D["Default history<br/>4 inputs · declared 45%"] --> S
+    F["Financial health<br/>4 inputs · declared 35%"] --> S
+    S --> L["Final loan_score"]
+    L --> G["A–F grade"]
+~~~
 
-## 📦 Output datasets
+### Inputs and point scale
 
-All outputs are written beneath `/user/itv026162/lendingclub/project/raw/`:
+- **Payment history:** last payment compared with the monthly instalment; total payment received compared with funded amount.
+- **Default history:** delinquencies over two years, public records, public bankruptcies, and recent enquiries.
+- **Financial health:** loan status, home ownership, funded amount relative to total high credit limit, and existing grade/sub-grade.
 
-- 👤 `customers_data_csv` — derived member ID, employment, income, location, home ownership, credit grade, and application details.
-- 💳 `loans_data_csv` — loan ID, member ID, requested and funded amounts, term, interest rate, instalment, issue date, status, purpose, and title.
-- 💸 `loans_repayments_data_csv` — loan ID, principal and interest received, late fees, payment totals, and payment dates.
-- 📋 `loan_defaulters_data_csv` — member ID and delinquency, public-record, inquiry, and late-fee indicators.
+The configured rating points are 0 (unacceptable), 100 (very bad), 250 (bad), 500 (good), 650 (very good), and 800 (excellent). Grade/sub-grade points are also adjusted using multipliers in the notebook.
 
-Each output is written with `repartition(1)`, so Spark produces one CSV data part per output directory. Spark may also add metadata files such as `_SUCCESS`.
+### Weights as implemented
 
-## 📂 Source data
+The notebook multiplies each sum of component points by its declared percentage:
 
-The notebook expects the input file at:
+~~~text
+payment component   = 0.20 × sum of 2 payment inputs
+default component   = 0.45 × sum of 4 default-history inputs
+financial component = 0.35 × sum of 4 financial-health inputs
+loan_score = payment component + default component + financial component
+~~~
 
-```text
-/user/itv026162/lendingclub/accepted_2007_to_2018Q4.csv
-```
+![Declared category weights compared with their normalized contribution when all input points are equal](./loan_score_weight_effect.svg)
 
-The expected source is the LendingClub `accepted_2007_to_2018Q4.csv` dataset.
+Because the groups contain different numbers of inputs, these formulas do not produce effective category weights of 20%, 45%, and 35%. If each input is at the same point value, the maximum contribution shares are approximately **11.1% payment**, **50.0% default history**, and **38.9% financial health**. These are formula-derived shares under equal input points, not observed contributions across the saved records.
 
-## 🚀 Run the notebook
+If finance intended the stated percentages to apply to the three categories, normalize each category first (for example, take the average of its input points or divide its sum by the category's maximum), then apply 20/45/35. Any such change requires re-evaluating the score range and grade thresholds.
 
-Open `Lending_club_project.ipynb` in a PySpark environment with access to HDFS, YARN, and Hive support. Ensure the source CSV is available at the HDFS path above, then run the notebook cells from top to bottom. The output directories are overwritten when the notebook is run again.
+### Grade bands in the notebook
 
-## 🔎 Identity key and data checks
+- **A:** score greater than 2,500
+- **B:** greater than 2,000 through 2,500
+- **C:** greater than 1,500 through 2,000
+- **D:** greater than 1,000 through 1,500
+- **E:** greater than 750 through 1,000
+- **F:** 750 or lower
 
-In its recorded run, the notebook reports **2,260,701 rows** and **2,257,384 distinct hashes**. Repeated hashes can represent shared profile values, not necessarily the same person. Rows whose nine hash inputs are all null produce the SHA-256 hash of an empty string; the notebook identifies these rows but does not remove them from the output datasets.
+## Saved output snapshot
 
-## ⚠️ Assumptions and limitations
+- The notebook's saved final-table count is **482,842 rows**.
+- A displayed example of a C-grade row has component scores of 200, 1,192.5, and 402.5, summing to 1,795.
+- The notebook displays sample rows but does not include a complete grade distribution, default rate by grade, or out-of-time validation results. The saved output therefore does not show whether the score ranks future credit risk reliably.
 
-- `name_sha2` is derived from borrower profile attributes because the notebook treats the source member ID as unavailable. Borrowers with identical values in those fields receive the same hash, so it is not a guaranteed unique or authoritative customer identifier.
-- `loan_defaulters_data_csv` is a name for the selected risk and delinquency fields. The notebook does not filter rows to confirmed defaulters or default loan statuses, so this extract contains those indicators for the source records generally.
-- The notebook uses schema inference and does not define explicit validation, cleaning, or null-handling rules for the other source fields.
+## Important analyst review before interpreting the grades
+
+### 1. Check the delinquency points constant
+
+For delinq_2yrs greater than 5 or a null value, the code assigns unacceptable_grade_pts, configured as **750**. Other rules use unacceptable_rated_pts, configured as **0**, for the unacceptable point level. This looks like a possible grade-threshold-versus-rating-points mix-up and can materially increase a score for high or missing delinquency. Confirm the intended business rule with finance before using the results.
+
+The public-record and bankruptcy rules assign 100 points when their values are null or above five, while the enquiry rule assigns 0 in those cases. Confirm that these different missing/high-value treatments are intentional.
+
+### 2. Define missing and unknown values
+
+The home_pts and grade_pts CASE expressions have no final ELSE branch. An unrecognized value can therefore produce a null component, which can make the total score null and leave it without an A–F grade. Define explicit handling and report missing/unrecognized inputs separately.
+
+### 3. Confirm scoring time and avoid leakage
+
+The financial-health rules include the existing loan grade/sub-grade and loan status, including outcomes such as fully paid, late, or charged off. If this score is meant to assess risk at application time, those fields may contain information that was not available then or may already encode a prior risk assessment. Specify the scoring date and only use fields available at that point.
+
+### 4. Confirm the row grain and joins
+
+The payment calculation joins repayments to loans by loan_id; later steps combine data by member_id. Validate that each input is unique at its intended join key and determine whether the final table is one row per loan or per member. The displayed final count is a row count, not a confirmed count of unique borrowers.
+
+### 5. Treat grade thresholds as provisional
+
+The saved examples do not provide performance by grade. Before using the score to guide credit decisions, compare grades with later repayment outcomes, check stability across time and relevant customer groups, and document the reason codes behind each score. Federal Reserve model-risk guidance discusses validation, outcome analysis, and ongoing monitoring; CFPB guidance explains that adverse-action reasons must be specific and reflect the factors actually considered.
+
+- [Federal Reserve, Revised Guidance on Model Risk Management (2026)](https://www.federalreserve.gov/supervisionreg/srletters/SR2602.htm)
+- [CFPB Circular 2022-03, adverse-action reasons for credit decisions](https://www.consumerfinance.gov/compliance/circulars/circular-2022-03-adverse-action-notification-requirements-in-connection-with-credit-decisions-based-on-complex-algorithms/)
+
+## Scope and reproducibility
+
+This README documents the code and saved outputs embedded in Loan-Score_Calculation.ipynb; the Spark/YARN notebook was not rerun. The final count and sample rows describe that saved run only. The notebook depends on the corresponding Hive tables and Spark configuration values being present.
